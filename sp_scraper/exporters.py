@@ -33,6 +33,8 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
     cfg = cfg or {}
     decimal_comma = cfg.get("decimal_comma", True)
     today = dt.date.today().isoformat()
+    skus = [v.sku for v in p.variants if v.sku]
+    has_dup_skus = len(skus) != len(set(skus))
     rows = []
     for v in p.variants:
         images = v.images or p.images
@@ -43,7 +45,7 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
             "Brand": p.brand or cfg.get("default_brand", ""),
             "ItemMainCategory": p.category,
             "EAN": v.ean,
-            "ItemCode": v.sku or "-".join(x for x in (p.style_code, slugify(color), slugify(size)) if x),
+            "ItemCode": (v.sku if v.sku and not has_dup_skus else "-".join(x for x in (p.style_code, slugify(color), slugify(size)) if x)),
             "ItemDescription": " ".join(x for x in (p.style_name, color, size) if x),
             "Color": color,
             "Size": size,

@@ -514,10 +514,11 @@ def apply_sumoshop(soup: BeautifulSoup, p: Product, url: str) -> None:
         if not sizes:
             continue
         for size in sizes:
+            slug = re.sub(r"[^a-z0-9]+", "-", size.lower()).strip("-")
             p.variants.append(Variant(
                 color=color,
                 size=size,
-                sku=f"{p.style_code}-{pid}" if p.style_code else pid,
+                sku=f"{p.style_code}-{pid}-{slug}" if p.style_code else f"{pid}-{slug}",
             ))
 
 
