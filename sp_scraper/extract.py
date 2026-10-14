@@ -408,6 +408,119 @@ def variants_from_json(payloads: list[Any]) -> list[Variant]:
     return list(found.values())
 
 
+# --------------------------------------------------------------------------- Sumoshop (b2b.sisterspoint.com)
+_SUMO_RE = re.compile(
+    r'sumoSelector\(\s*\{(.*?)\}\s*\)',
+    re.DOTALL,
+)
+_SUMO_ITEMS_RE = re.compile(
+    r'"items"\s*:\s*\{(.*?)\}\s*,\s*"pids"',
+    re.DOTALL,
+)
+_SUMO_ITEM_RE = re.compile(
+    r'"(\d+)"\s*:\s*\{[^}]*"params"\s*:\s*\[([^\]]*)\][^}]*\}',
+)
+
+
+def _parse_sumo_sizes(size_str: str) -> list[str]:
+    """Parse ' XS:1 - S:2 - M:2 - L:2 - XL:1' into ['XS','S','M','L','XL']."""
+    sizes = []
+    for part in size_str.split("-"):
+        part = part.strip()
+        if ":" in part:
+            sizes.append(part.split(":")[0].strip())
+        elif "/" in part:
+            sizes.append(part.split("/")[0].strip())
+    return sizes
+
+
+def apply_sumoshop(soup: BeautifulSoup, p: Product, url: str) -> None:
+    """Extract data from the Sumoshop B2B platform used by sisterspoint.com."""
+    # Product title from h1
+    h1 = soup.select_one("#commodity-show-title, h1.headline")
+    if h1:
+        p.style_name = p.style_name or clean(h1.get_text(" "))
+
+    # Spec table: <dt id="color-dt">color</dt><dd id="color-dd">D. Chocolate</dd>
+    for dt in soup.select("dt[id]"):
+        dd = dt.find_next_sibling("dd")
+        if not dd:
+            continue
+        key = (dt.get("id") or "").replace("-dt", "").lower()
+        val = clean(dd.get_text(" "))
+        if not val:
+            continue
+        if key == "color" or key == "farve":
+            p.color = p.color or val
+        elif key == "externalcode":
+            p.style_code = p.style_code or val
+        elif key == "material" or key == "materiale":
+            p.composition = p.composition or val
+        elif key == "description" or key == "beskrivelse":
+            p.description = p.description or val
+        elif key == "season" or key == "sæson":
+            p.season = p.season or val
+        elif key == "weight" or key == "vægt":
+            if not p.weight:
+                m = re.search(r"([\d.,]+)\s*([a-zA-Z]*)", val)
+                if m:
+                    p.weight, p.weight_unit = m.group(1), (m.group(2) or "kg").lower()
+
+    # Prices from the product page (not from related products)
+    show = soup.select_one("#commodity-show")
+    if show:
+        price_el = show.select_one(".price")
+        if price_el and p.wholesale_price is None:
+            p.wholesale_price = parse_price(price_el.get_text(" "))
+        retail_el = show.select_one(".retailprice")
+        if retail_el and p.retail_price is None:
+            p.retail_price = parse_price(retail_el.get_text(" "))
+
+    # High-res images from gallery
+    gallery_imgs = soup.select("#commodity-show-images a.popup[href]")
+    if gallery_imgs:
+        seen = set()
+        imgs = []
+        for a in gallery_imgs:
+            href = a.get("href", "")
+            if href and href not in seen and not href.endswith(".svg"):
+                seen.add(href)
+                imgs.append(urljoin(url, href))
+        p.images = imgs or p.images
+
+    # sumoSelector JS: variant data (color, sizes, availability, PIDs)
+    html_text = str(soup)
+    m = _SUMO_RE.search(html_text)
+    if not m:
+        return
+    blob = m.group(1)
+
+    # Extract items
+    items_m = _SUMO_ITEMS_RE.search(blob)
+    if not items_m:
+        return
+    items_str = items_m.group(1)
+
+    for pid_m in _SUMO_ITEM_RE.finditer(items_str):
+        pid = pid_m.group(1)
+        params_str = pid_m.group(2)
+        # params is like: "D. Chocolate", " XS:1 - S:2 - M:2 - L:2 - XL:1"
+        params = [s.strip().strip('"').strip("'") for s in params_str.split(",", 1)]
+        if len(params) < 2:
+            continue
+        color = params[0].strip()
+        size_str = params[1].strip().strip('"').strip("'")
+        sizes = _parse_sumo_sizes(size_str)
+        if not sizes:
+            continue
+        for size in sizes:
+            p.variants.append(Variant(
+                color=color,
+                size=size,
+                sku=f"{p.style_code}-{pid}" if p.style_code else pid,
+            ))
+
+
 # --------------------------------------------------------------------------- main entry
 def extract_product(html: str, url: str, selectors: dict | None = None,
                     json_payloads: list[Any] | None = None, category: str = "") -> Product:
@@ -436,8 +549,9 @@ def extract_product(html: str, url: str, selectors: dict | None = None,
         if ":" in val and field_for_label(val.split(":", 1)[0]):
             setattr(p, fld, val.split(":", 1)[1].strip())
 
-    # 2-3. structured data and spec tables
+    # 2-3. structured data, Sumoshop, and spec tables
     apply_jsonld(soup, p, url)
+    apply_sumoshop(soup, p, url)
     spec_root = soup.select_one(sel["details"]) if sel.get("details") else None
     apply_spec_pairs(spec_root or soup.body or soup, p)
 
