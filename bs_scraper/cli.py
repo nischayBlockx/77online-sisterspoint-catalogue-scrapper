@@ -240,11 +240,11 @@ def main(argv: list[str] | None = None) -> int:
                           help="Cookie string or path to JSON file")
 
     p_disc = sub.add_parser("discover", help="Save raw API data for debugging")
-    p_disc.add_argument("--list-id", default="ZLs6MUPd7w", help="Favourite list ID")
+    p_disc.add_argument("--list-id", default="tbtayJwvFC", help="Favourite list ID")
     p_disc.add_argument("--output", default="output", help="Output directory")
 
     p_scrape = sub.add_parser("scrape", help="Scrape products from favourite list")
-    p_scrape.add_argument("--list-id", default="ZLs6MUPd7w", help="Favourite list ID")
+    p_scrape.add_argument("--list-id", default="tbtayJwvFC", help="Favourite list ID")
     p_scrape.add_argument("--category", default="", help="Category name override")
     p_scrape.add_argument("--output", default="output", help="Output directory")
     p_scrape.add_argument("--fresh", action="store_true", help="Ignore resume data")
