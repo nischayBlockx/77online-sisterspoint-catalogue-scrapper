@@ -1,0 +1,56 @@
+# Copy to config.yaml and adjust. Every key is optional - defaults live in
+# sp_scraper/config.py. Credentials go in .env (SP_USERNAME / SP_PASSWORD).
+
+base_url: "https://b2b.sisterspoint.com/"
+# login_url: "https://b2b.sisterspoint.com/login"   # if the login form is on its own page
+headless: true
+delay_seconds: 1.0          # pause after every page load
+max_products_per_category: 0
+
+default_brand: "Sisters Point"
+default_gender: "female"
+
+# Scrape exactly these categories. Leave out to auto-discover from the menu.
+# Run `python -m sp_scraper categories` and paste the output here.
+# categories:
+#   - name: "Dresses"
+#     url: "https://b2b.sisterspoint.com/dresses"
+#   - name: "Knitwear"
+#     url: "https://b2b.sisterspoint.com/knitwear"
+
+# Only treat links matching this as product pages (helps if menus/banners get picked up)
+# product_url_regex: "/product/"
+
+# CSS selectors - only needed if auto-detection misses something.
+# Run `python -m sp_scraper discover` and look at output/debug/*.html to find them.
+selectors:
+  login:
+    username: ""          # e.g. "#email"
+    password: ""          # e.g. "#password"
+    submit: ""            # e.g. "button[type=submit]"
+    logged_in: ""         # e.g. "a[href*=logout]"
+  product_links: ""       # e.g. ".product-card a.product-link"
+  product:
+    name: ""
+    style_code: ""
+    color: ""
+    description: ""
+    wholesale_price: ""
+    retail_price: ""
+    images: ""            # e.g. ".gallery img"
+    variant_row: ""       # e.g. ".size-grid tr"  (one per size / EAN)
+    variant_size: ""
+    variant_ean: ""
+    variant_stock: ""
+    color_links: ""       # e.g. ".color-swatches a" - also scrape the other colours
+
+shopify:
+  status: "draft"               # import as draft so you can review first
+  published: false
+  price_multiplier: 1.0         # EUR -> your store currency (e.g. 90 for INR)
+  markup_on_wholesale: 2.5      # selling price when the site shows no RRP
+  compare_at_retail: false
+  track_inventory: true
+  vendor: ""                    # override vendor (default = Brand)
+  product_category: ""          # e.g. "Apparel & Accessories > Clothing"
+  tags: ["Sisters Point"]
