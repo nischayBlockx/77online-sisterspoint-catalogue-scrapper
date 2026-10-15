@@ -39,6 +39,7 @@ class BestsellerHTTP:
             for name, value in data.items():
                 self._session.cookies.set(name, value, domain=".bestseller.com")
         log.info("Loaded %d cookies from %s", len(self._session.cookies), path)
+        self._setup_headers()
         return True
 
     def set_cookie_string(self, cookie_str: str):
@@ -48,30 +49,35 @@ class BestsellerHTTP:
                 name, value = part.split("=", 1)
                 self._session.cookies.set(name.strip(), value.strip(), domain=".bestseller.com")
         log.info("Set %d cookies from string", len(self._session.cookies))
+        self._setup_headers()
+
+    def _setup_headers(self):
+        csrf = self._session.cookies.get("CSRF-TOKEN") or ""
+        sid = self._session.cookies.get("sessionId") or ""
+        last_tab = self._session.cookies.get("sessionIdToUseForNewTab") or sid
+        self._session.headers.update({
+            "__RequestVerificationToken": csrf,
+            "tabId": sid,
+            "lastTabId": last_tab,
+        })
 
     def is_logged_in(self) -> bool:
         try:
             resp = self._session.get(f"{BASE}/api/user/me", timeout=15)
             if resp.status_code == 200 and "application/json" in resp.headers.get("content-type", ""):
                 data = resp.json()
-                if data and data.get("email"):
-                    log.info("Logged in as %s", data["email"])
+                if data and (data.get("email") or data.get("capabilities")):
+                    log.info("Logged in (capabilities: %s)", data.get("capabilities", [])[:3])
                     return True
         except Exception as e:
             log.warning("Auth check failed: %s", e)
         return False
 
-    def api_get(self, path: str, params: dict | None = None) -> Any:
-        url = f"{BASE}{path}"
-        resp = self._session.get(url, params=params, timeout=30)
-        if resp.status_code != 200:
-            log.warning("GET %s returned %s", path, resp.status_code)
-            return None
-        ct = resp.headers.get("content-type", "")
-        if "text/html" in ct:
-            log.warning("GET %s returned HTML (not authenticated?)", path)
-            return None
-        return resp.json()
+    def get_segmentation_id(self) -> int:
+        resp = self._session.get(f"{BASE}/api/segmentation", timeout=15)
+        if resp.status_code == 200 and "json" in resp.headers.get("content-type", ""):
+            return resp.json().get("id", 55)
+        return 55
 
     def api_post(self, path: str, body: dict) -> Any:
         url = f"{BASE}{path}"
@@ -85,43 +91,50 @@ class BestsellerHTTP:
             return None
         return resp.json()
 
-    def get_favourite_list(self, list_id: str) -> dict | None:
-        return self.api_get("/api/favouritelist/index", {"favouriteListId": list_id})
-
-    def get_favourite_list_page(self, list_id: str, page: int = 0, page_size: int = 100) -> dict | None:
-        return self.api_get("/api/favouritelist/page", {
+    def get_favourite_list_index(self, list_id: str, seg_id: int = 55) -> dict | None:
+        return self.api_post("/api/favouritelist/index", {
+            "segmentationId": seg_id,
+            "filters": [],
+            "groupingType": "Ungrouped",
             "favouriteListId": list_id,
-            "page": str(page),
-            "pageSize": str(page_size),
+            "sortBy": "MasterIdOrder",
+            "sortDirection": "Descending",
+        })
+
+    def get_favourite_list_page(self, list_id: str, page: int = 1,
+                                page_size: int = 36, seg_id: int = 55) -> dict | None:
+        return self.api_post("/api/favouritelist/page", {
+            "segmentationId": seg_id,
+            "sortBy": "MasterIdOrder",
+            "sortDirection": "Descending",
+            "pageNumber": page,
+            "pageSize": page_size,
+            "filters": [],
+            "favouriteListId": list_id,
+            "groupingType": "Ungrouped",
+            "groupingKey": "",
         })
 
     def get_all_favourite_products(self, list_id: str) -> list[dict]:
+        seg_id = self.get_segmentation_id()
         all_items = []
-        page = 0
+        page = 1
         while True:
             log.info("Fetching favourite list page %d...", page)
-            data = self.get_favourite_list_page(list_id, page=page, page_size=100)
+            data = self.get_favourite_list_page(list_id, page=page, page_size=100, seg_id=seg_id)
             if not data:
                 break
-            items = data.get("items") or data.get("products") or data.get("families") or []
-            if not items:
-                for key in data:
-                    if isinstance(data[key], list) and len(data[key]) > 0:
-                        items = data[key]
-                        log.info("Found items under key '%s'", key)
-                        break
-            if not items:
+            lines = data.get("lines", [])
+            if not lines:
                 log.info("No more items on page %d", page)
                 break
-            all_items.extend(items)
-            log.info("Page %d: %d items (total: %d)", page, len(items), len(all_items))
-            total = data.get("totalCount") or data.get("total") or data.get("totalItems")
+            all_items.extend(lines)
+            paging = data.get("pagingInformation", {})
+            total = paging.get("totalNumberOfItems", 0)
+            log.info("Page %d: %d items (total so far: %d / %d)", page, len(lines), len(all_items), total)
             if total and len(all_items) >= total:
                 break
-            if len(items) < 100:
+            if len(lines) < 100:
                 break
             page += 1
         return all_items
-
-    def get_product_detail(self, family_id: str) -> dict | None:
-        return self.api_get(f"/api/product/family/{family_id}")

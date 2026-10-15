@@ -6,74 +6,69 @@ from typing import Any
 
 from sp_scraper.models import Product, Variant
 
+BASE = "https://more.bestseller.com"
+
 
 def extract_product_from_api(item: dict, category: str = "") -> Product | None:
-    """Convert a Bestseller API product/family object to a Product."""
+    """Convert a Bestseller favourite list line item to a Product.
+
+    Handles the actual API format: each line has id, styleNumber, name, brand,
+    pricingDetails, primaryColour, masters (colour variants), etc.
+    """
     if not item:
         return None
 
-    style_code = (
-        item.get("styleNumber") or item.get("styleOptionNumber")
-        or item.get("articleNumber") or item.get("productNumber") or ""
-    )
-    style_name = (
-        item.get("styleName") or item.get("name")
-        or item.get("productName") or item.get("familyName") or ""
-    )
-    brand = (
-        item.get("brandName") or item.get("brand")
-        or item.get("presentationBrand") or ""
-    )
-    color = item.get("colourName") or item.get("colour") or item.get("color") or ""
-    description = item.get("description") or item.get("productDescription") or ""
-    composition = item.get("composition") or item.get("material") or ""
-    care = item.get("washingInstructions") or item.get("careInstructions") or ""
-    origin = item.get("countryOfOrigin") or item.get("origin") or ""
-    season = item.get("season") or item.get("seasonName") or ""
-    gender = item.get("gender") or item.get("targetGroup") or ""
-    tariff = item.get("hsCode") or item.get("customsTariffNumber") or ""
-    weight = ""
-    weight_unit = ""
+    style_code = item.get("styleNumber") or item.get("id", "").replace("F_", "") or ""
+    style_name = item.get("name") or ""
+    brand = item.get("brand") or ""
 
-    wholesale_price = _parse_price(item.get("wholesalePrice") or item.get("unitNetPrice") or item.get("price"))
-    retail_price = _parse_price(item.get("retailPrice") or item.get("recommendedRetailPrice") or item.get("rrp"))
+    pricing = item.get("pricingDetails") or {}
+    wholesale_price = pricing.get("price") or pricing.get("originalPrice")
+    retail_price = pricing.get("recommendedRetailPrice")
 
-    images = _extract_images(item)
+    primary_colour = item.get("primaryColour") or {}
+    color = primary_colour.get("name") or ""
 
-    cat = category or item.get("categoryName") or item.get("productCategory") or ""
+    cat_obj = item.get("category") or {}
+    cat = category or cat_obj.get("name") or ""
+
+    images = _extract_images_from_line(item)
+
+    url = item.get("url") or ""
+    if url and not url.startswith("http"):
+        url = f"{BASE}{url}"
 
     p = Product(
-        url=_product_url(item),
+        url=url,
         category=cat,
         brand=brand,
         style_code=style_code,
         style_name=style_name,
-        description=description,
-        composition=composition,
-        care=care,
-        origin=origin,
-        tariff=re.sub(r"\s", "", str(tariff)),
-        weight=weight,
-        weight_unit=weight_unit,
-        season=season,
-        gender=gender,
+        description="",
+        composition="",
+        care="",
+        origin="",
+        tariff="",
+        weight="",
+        weight_unit="",
+        season="",
+        gender="",
         color=color,
         wholesale_price=wholesale_price,
         retail_price=retail_price,
         images=images,
     )
 
-    # Extract variants (sizes/colors)
-    variants = _extract_variants(item, p)
+    variants = _extract_variants_from_masters(item, p)
     if variants:
         p.variants = variants
     else:
         p.variants = [Variant(
             color=color,
-            size=item.get("size") or "one size",
-            ean=str(item.get("ean") or item.get("gtin") or item.get("barcode") or ""),
+            size="one size",
+            ean="",
             sku=style_code,
-            stock=item.get("stock") or item.get("availableQuantity"),
+            stock=None,
             wholesale_price=wholesale_price,
             retail_price=retail_price,
         )]
@@ -81,79 +76,54 @@ def extract_product_from_api(item: dict, category: str = "") -> Product | None:
     return p
 
 
-def _parse_price(val) -> float | None:
-    if val is None or val == "":
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    s = str(val).replace(",", ".").strip()
-    m = re.search(r"(\d+\.?\d*)", s)
-    return float(m.group(1)) if m else None
-
-
-def _product_url(item: dict) -> str:
-    slug = item.get("slug") or item.get("productSlug") or ""
-    fid = item.get("familyId") or item.get("id") or item.get("productId") or ""
-    if slug:
-        return f"https://more.bestseller.com/en/product/{slug}"
-    if fid:
-        return f"https://more.bestseller.com/en/product/{fid}"
-    return ""
-
-
-def _extract_images(item: dict) -> list[str]:
+def _extract_images_from_line(item: dict) -> list[str]:
     images = []
-    for key in ("imageUrl", "primaryImageUrl", "image", "thumbnail"):
-        url = item.get(key)
+    primary = item.get("primaryImage") or {}
+    for key in ("size1800", "size450", "jpegSize450"):
+        url = primary.get(key)
         if url and url not in images:
             images.append(url)
+            break
 
-    for img_list_key in ("images", "imageUrls", "media", "productImages"):
-        img_list = item.get(img_list_key)
-        if isinstance(img_list, list):
-            for img in img_list:
-                url = img if isinstance(img, str) else (img.get("url") or img.get("imageUrl") or "")
-                if url and url not in images:
-                    images.append(url)
-
-    # Ensure full URLs
-    return [u if u.startswith("http") else f"https://more.bestseller.com{u}" for u in images]
+    for master in item.get("masters") or []:
+        for img_obj in master.get("images") or []:
+            url = img_obj.get("size1800") or img_obj.get("size450") or ""
+            if url and url not in images:
+                images.append(url)
+    return images
 
 
-def _extract_variants(item: dict, p: Product) -> list[Variant]:
+def _extract_variants_from_masters(item: dict, p: Product) -> list[Variant]:
+    """Each master is a colour variant."""
     variants = []
+    masters = item.get("masters") or []
+    if not masters:
+        return variants
 
-    # Check for nested variants/sizes/styles arrays
-    for key in ("variants", "sizes", "styles", "styleOptions", "skus", "items"):
-        var_list = item.get(key)
-        if not isinstance(var_list, list) or not var_list:
-            continue
+    pricing = item.get("pricingDetails") or {}
+    wp = pricing.get("price") or pricing.get("originalPrice")
+    rp = pricing.get("recommendedRetailPrice")
 
-        for v in var_list:
-            if not isinstance(v, dict):
-                continue
-            color = v.get("colourName") or v.get("colour") or v.get("color") or p.color
-            size = v.get("sizeName") or v.get("size") or v.get("sizeCode") or "one size"
-            ean = str(v.get("ean") or v.get("gtin") or v.get("barcode") or "")
-            sku = v.get("sku") or v.get("styleOptionNumber") or v.get("articleNumber") or ""
-            stock = v.get("stock") or v.get("availableQuantity") or v.get("quantity")
-            wp = _parse_price(v.get("wholesalePrice") or v.get("unitNetPrice") or v.get("price"))
-            rp = _parse_price(v.get("retailPrice") or v.get("recommendedRetailPrice") or v.get("rrp"))
+    for master in masters:
+        mid = master.get("id", "").replace("M_", "")
+        colour_obj = master.get("colour") or {}
+        colour = colour_obj.get("name") or p.color
 
-            # Extract variant images
-            v_images = _extract_images(v) if any(v.get(k) for k in ("imageUrl", "images", "media")) else []
+        master_images = []
+        for img_obj in master.get("images") or []:
+            url = img_obj.get("size1800") or img_obj.get("size450") or ""
+            if url and url not in master_images:
+                master_images.append(url)
 
-            variants.append(Variant(
-                color=color,
-                size=size,
-                ean=ean,
-                sku=sku or f"{p.style_code}-{size}",
-                stock=stock,
-                wholesale_price=wp,
-                retail_price=rp,
-                images=v_images,
-            ))
-        if variants:
-            return variants
+        variants.append(Variant(
+            color=colour,
+            size="one size",
+            ean="",
+            sku=f"{p.style_code}-{mid}" if mid else p.style_code,
+            stock=None,
+            wholesale_price=wp,
+            retail_price=rp,
+            images=master_images,
+        ))
 
     return variants
