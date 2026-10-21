@@ -29,6 +29,12 @@ def slugify(text: str) -> str:
 
 
 # --------------------------------------------------------------------------- products -> rows
+def base_style_code(code: str) -> str:
+    """Style code without the colour suffix (e.g. '19059-904' -> '19059')."""
+    m = re.fullmatch(r"(\d+)-\d+", (code or "").strip())
+    return m.group(1) if m else (code or "")
+
+
 def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
     cfg = cfg or {}
     decimal_comma = cfg.get("decimal_comma", True)
@@ -49,7 +55,7 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
             "ItemDescription": " ".join(x for x in (p.style_name, color, size) if x),
             "Color": color,
             "Size": size,
-            "StyleCode": p.style_code,
+            "StyleCode": base_style_code(p.style_code),
             "StyleName": p.style_name,
             "Wholesale_Price_Euro": fmt_decimal(v.wholesale_price if v.wholesale_price is not None else p.wholesale_price, decimal_comma),
             "Retail_Price_Euro": fmt_decimal(v.retail_price if v.retail_price is not None else p.retail_price, decimal_comma),
