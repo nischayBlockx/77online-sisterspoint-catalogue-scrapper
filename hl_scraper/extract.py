@@ -82,7 +82,7 @@ def split_name(full: str) -> tuple[str, str]:
 def _matrix_groups(page: str) -> list[dict]:
     groups = []
     for kind in ("singles", "lots"):
-        for m in re.finditer(rf'<div class="matrix-group {kind}">(.*?)(?=<div class="matrix-group |</div></div><section|<section class="cell xsells)', page, re.S):
+        for m in re.finditer(rf'<div class="matrix-group {kind}">(.*?)(?=<div class="matrix-group |</div></div><section|<section class="cell xsells|\Z)', page, re.S):
             seg = m.group(1)
             tbl = re.search(r'<table class="matrix">(.*?)</table>', seg, re.S)
             if not tbl:
@@ -119,6 +119,11 @@ def _images(page: str) -> list[str]:
         if out:
             break
     return out
+
+
+def item_code(art_no: str, colour: str, size: str) -> str:
+    slug = lambda t: re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
+    return "-".join(x for x in (art_no, slug(colour), slug(size)) if x)
 
 
 def extract_product(page: str, url: str, tile: dict, category: str) -> Product | None:
@@ -183,7 +188,7 @@ def extract_product(page: str, url: str, tile: dict, category: str) -> Product |
     if not sizes:
         sizes = ["one size"]
     p.variants = [
-        Variant(color=colour, size=s, ean="", sku=f"{art_no}-{re.sub(r'[^A-Za-z0-9]+', '', s)}",
+        Variant(color=colour, size=s, ean="", sku=item_code(art_no, colour, s),
                 stock=stock.get(s), wholesale_price=wholesale, retail_price=retail)
         for s in sizes
     ]

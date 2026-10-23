@@ -17,7 +17,7 @@ from sp_scraper.exporters import (
     write_catalogue_xlsx, write_shopify_csv,
 )
 
-from .extract import BASE, CATEGORY_MAP, extract_product, listing_total, parse_listing
+from .extract import BASE, CATEGORY_MAP, extract_product, item_code, listing_total, parse_listing
 
 log = logging.getLogger("hl_scraper")
 COOKIE_FILE = Path(".auth/hailys_cookie.txt")
@@ -168,15 +168,18 @@ def cmd_scrape(args) -> int:
         list(ex.map(work, todo))
 
     products = load_products_jsonl(jsonl)
-    # dedupe on article number as a second safety net
-    seen_art, uniq = set(), []
+    # a style (article number) has one page per colour, so dedupe on style + colour
+    seen_key, uniq = set(), []
     for p in products:
-        if p.style_code in seen_art:
-            log.warning("Duplicate article number dropped: %s %s", p.style_code, p.url)
+        key = (p.style_code, p.color)
+        if key in seen_key:
+            log.warning("Duplicate style+colour dropped: %s %s %s", p.style_code, p.color, p.url)
             continue
-        seen_art.add(p.style_code)
+        seen_key.add(key)
+        for v in p.variants:
+            v.sku = item_code(p.style_code, p.color, v.size)
         uniq.append(p)
-    log.info("Scraped %d products (%d failed, %d duplicates by article no.)",
+    log.info("Scraped %d products (%d failed, %d duplicates by style+colour)",
              len(uniq), len(failed), len(products) - len(uniq))
     (out / "hl_failed.json").write_text(json.dumps(failed, indent=1))
     (out / "hl_stats.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False))
@@ -185,6 +188,15 @@ def cmd_scrape(args) -> int:
 
 
 def _export(products, out: Path) -> None:
+    excluded = [p for p in products if not p.category]
+    products = [p for p in products if p.category]
+    if excluded:
+        with (out / "hl_excluded_non_fashion.csv").open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["article_no", "name", "colour", "url"])
+            for p in excluded:
+                w.writerow([p.style_code, p.style_name, p.color, p.url])
+        log.info("Excluded %d uncategorised items (POS fittings) -> hl_excluded_non_fashion.csv", len(excluded))
     rows = products_to_rows(products, {"default_brand": "Hailys"})
     write_catalogue_xlsx(rows, out / "hl_catalogue_all.xlsx")
     write_shopify_csv(rows, out / "hl_shopify_products_all.csv", {
@@ -195,7 +207,15 @@ def _export(products, out: Path) -> None:
 
 def cmd_export(args) -> int:
     out = Path(args.output)
-    _export(load_products_jsonl(out / "hl_products.jsonl"), out)
+    seen, uniq = set(), []
+    for p in load_products_jsonl(out / "hl_products.jsonl"):
+        if (p.style_code, p.color) in seen:
+            continue
+        seen.add((p.style_code, p.color))
+        for v in p.variants:
+            v.sku = item_code(p.style_code, p.color, v.size)
+        uniq.append(p)
+    _export(uniq, out)
     return 0
 
 
