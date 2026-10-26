@@ -22,6 +22,8 @@ from .extract import BASE, CATEGORY_MAP, extract_product, item_code, listing_tot
 log = logging.getLogger("hl_scraper")
 COOKIE_FILE = Path(".auth/hailys_cookie.txt")
 _local = threading.local()
+PREFIX = "hl"
+SITE = "hailys"
 
 # (listing path, brand line, group name used for the category mapping)
 MAIN_GROUPS = ["accessoires", "blazer", "blusen", "hosen", "jacken", "hosenanzuege", "jeans", "kleider",
@@ -86,15 +88,29 @@ def crawl_listing(path: str) -> list[dict]:
     return items
 
 
+ZAB_GROUPS = ["accessoires", "blazer", "blusen", "hosen", "jacken", "jeans", "kleider", "maentel",
+              "roecke", "schals-tuecher", "shirts", "strickwaren", "sweats", "westen"]
+
+SITES = {
+    "hailys": {"base": BASE, "cookie": ".auth/hailys_cookie.txt", "output": "output/hailys", "prefix": "hl"},
+    "zabaione": {"base": "https://shop.zabaione.de", "cookie": ".auth/zabaione_cookie.txt",
+                 "output": "output/zabaione", "prefix": "za"},
+}
+
+
 def build_queue() -> tuple[dict[str, dict], dict]:
-    """Return {url: info} deduped; main/teens/z-one groups define the category."""
+    """Return {url: info} deduped; group listings define the category."""
     sources = []
-    for g in MAIN_GROUPS:
-        sources.append((f"/hailys/{g}.html", "HAILYS", GROUP_NAME[g]))
-    for g in TEEN_GROUPS:
-        sources.append((f"/hailys-teens/{g}.html", "TEENS", GROUP_NAME[g]))
-    for g in ZONE_GROUPS:
-        sources.append((f"/z-one/{g}.html", "Z-ONE", GROUP_NAME[g]))
+    if SITE == "hailys":
+        for g in MAIN_GROUPS:
+            sources.append((f"/hailys/{g}.html", "HAILYS", GROUP_NAME[g]))
+        for g in TEEN_GROUPS:
+            sources.append((f"/hailys-teens/{g}.html", "TEENS", GROUP_NAME[g]))
+        for g in ZONE_GROUPS:
+            sources.append((f"/z-one/{g}.html", "Z-ONE", GROUP_NAME[g]))
+    else:
+        for g in ZAB_GROUPS:
+            sources.append((f"/zabaione/{g}.html", "ZABAIONE", GROUP_NAME[g]))
     sources.append(("/pos.html", "POS", ""))
     extra = [("/nos.html", "NOS"), ("/new-in.html", "NEW IN"), ("/topseller.html", "TOPSELLER")]
 
@@ -128,7 +144,7 @@ def build_queue() -> tuple[dict[str, dict], dict]:
 def cmd_scrape(args) -> int:
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    jsonl = out / "hl_products.jsonl"
+    jsonl = out / f"{PREFIX}_products.jsonl"
     if args.fresh and jsonl.exists():
         jsonl.unlink()
     if _get(f"{BASE}/") is None:
@@ -136,7 +152,7 @@ def cmd_scrape(args) -> int:
         return 2
 
     queue, stats = build_queue()
-    (out / "hl_queue.json").write_text(json.dumps(queue, indent=1, ensure_ascii=False))
+    (out / f"{PREFIX}_queue.json").write_text(json.dumps(queue, indent=1, ensure_ascii=False))
     log.info("Unique product URLs: %d (listing hits %d, duplicates skipped %d)",
              len(queue), stats["listing_hits"], stats["dupes_skipped"])
 
@@ -158,8 +174,7 @@ def cmd_scrape(args) -> int:
                 failed.append(u)
                 log.warning("[%d/%d] FAILED %s", counter["n"], len(todo), u)
                 return
-            if "NOS" in info["tags"]:
-                p.season = "NOS"
+            p.season = ",".join(t for t in ("NOS", "TOPSELLER") if t in info["tags"])
             append_product_jsonl(jsonl, p)
             if counter["n"] % 50 == 0:
                 log.info("[%d/%d] %s", counter["n"], len(todo), p.style_name)
@@ -181,8 +196,8 @@ def cmd_scrape(args) -> int:
         uniq.append(p)
     log.info("Scraped %d products (%d failed, %d duplicates by style+colour)",
              len(uniq), len(failed), len(products) - len(uniq))
-    (out / "hl_failed.json").write_text(json.dumps(failed, indent=1))
-    (out / "hl_stats.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False))
+    (out / f"{PREFIX}_failed.json").write_text(json.dumps(failed, indent=1))
+    (out / f"{PREFIX}_stats.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False))
     _export(uniq, out)
     return 1 if failed else 0
 
@@ -191,15 +206,15 @@ def _export(products, out: Path) -> None:
     excluded = [p for p in products if not p.category]
     products = [p for p in products if p.category]
     if excluded:
-        with (out / "hl_excluded_non_fashion.csv").open("w", newline="", encoding="utf-8") as fh:
+        with (out / f"{PREFIX}_excluded_non_fashion.csv").open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["article_no", "name", "colour", "url"])
             for p in excluded:
                 w.writerow([p.style_code, p.style_name, p.color, p.url])
-        log.info("Excluded %d uncategorised items (POS fittings) -> hl_excluded_non_fashion.csv", len(excluded))
-    rows = products_to_rows(products, {"default_brand": "Hailys"})
-    write_catalogue_xlsx(rows, out / "hl_catalogue_all.xlsx")
-    write_shopify_csv(rows, out / "hl_shopify_products_all.csv", {
+        log.info("Excluded %d uncategorised items (shop fittings) -> %s_excluded_non_fashion.csv", len(excluded), PREFIX)
+    rows = products_to_rows(products, {"default_brand": SITE.capitalize()})
+    write_catalogue_xlsx(rows, out / f"{PREFIX}_catalogue_all.xlsx")
+    write_shopify_csv(rows, out / f"{PREFIX}_shopify_products_all.csv", {
         "shopify": {"status": "draft", "published": False, "price_multiplier": 1.0,
                     "markup_on_wholesale": 2.5, "track_inventory": True}})
     log.info("Exported %d variants / %d products -> %s", len(rows), len(products), out)
@@ -208,7 +223,7 @@ def _export(products, out: Path) -> None:
 def cmd_export(args) -> int:
     out = Path(args.output)
     seen, uniq = set(), []
-    for p in load_products_jsonl(out / "hl_products.jsonl"):
+    for p in load_products_jsonl(out / f"{PREFIX}_products.jsonl"):
         if (p.style_code, p.color) in seen:
             continue
         seen.add((p.style_code, p.color))
@@ -222,14 +237,20 @@ def cmd_export(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hl_scraper")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--site", choices=sorted(SITES), default="hailys")
     sub = ap.add_subparsers(dest="cmd")
     sc = sub.add_parser("scrape")
-    sc.add_argument("--output", default="output/hailys")
+    sc.add_argument("--output", default=None)
     sc.add_argument("--fresh", action="store_true")
     sc.add_argument("--workers", type=int, default=5)
     ex = sub.add_parser("export")
-    ex.add_argument("--output", default="output/hailys")
+    ex.add_argument("--output", default=None)
     a = ap.parse_args(argv)
+    global BASE, COOKIE_FILE, PREFIX, SITE
+    cfg = SITES[a.site]
+    BASE, COOKIE_FILE, PREFIX, SITE = cfg["base"], Path(cfg["cookie"]), cfg["prefix"], a.site
+    if getattr(a, "output", None) is None:
+        a.output = cfg["output"]
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S", stream=sys.stderr)
     logging.getLogger("urllib3").setLevel(logging.WARNING)

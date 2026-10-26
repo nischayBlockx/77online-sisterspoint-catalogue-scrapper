@@ -62,7 +62,7 @@ def parse_listing(page: str) -> list[dict]:
 
 def listing_total(page: str) -> int | None:
     x = _txt(re.sub(r"<(script|style)[\s\S]*?</\1>", "", page))
-    m = re.search(r"Artikel \d+ - \d+ von (\d+)", x) or re.search(r"(\d+) Artikel", x)
+    m = re.search(r"Artikel \d+ - \d+ von (\d+)", x) or re.search(r"(\d+) (?:Artikel|Eintr)", x)
     return int(m.group(1)) if m else None
 
 
@@ -111,7 +111,7 @@ def _matrix_groups(page: str) -> list[dict]:
 def _images(page: str) -> list[str]:
     seen, out = set(), []
     for size in ("980x1288", "920x1280"):
-        for u in re.findall(rf"https://shop\.hailys-fashion\.com/media/catalog/product/cache/{size}/[^\"\s<>]+\.(?:jpg|png|webp)", page):
+        for u in re.findall(rf"https://shop\.[a-z0-9.-]+/media/catalog/product/cache/{size}/[^\"\s<>]+\.(?:jpg|png|webp)", page):
             fn = u.rsplit("/", 1)[-1]
             if fn not in seen:
                 seen.add(fn)
