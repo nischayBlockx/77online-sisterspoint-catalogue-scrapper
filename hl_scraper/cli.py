@@ -5,7 +5,10 @@ import argparse
 import csv
 import json
 import logging
+import os
+import re
 import sys
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -41,15 +44,29 @@ GROUP_NAME = {
 }
 
 
+def _proxy_url() -> str | None:
+    """Current local egress proxy; its port changes when the proxy restarts."""
+    try:
+        m = re.search(r"local proxy at (http://127\.0\.0\.1:\d+)", Path("/root/.ccr/README.md").read_text())
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return os.environ.get("HTTPS_PROXY")
+
+
 def _session() -> requests.Session:
     if not hasattr(_local, "s"):
         s = requests.Session()
+        proxy = _proxy_url()
+        if proxy:
+            s.proxies = {"https": proxy, "http": proxy}
         s.headers.update({"User-Agent": "Mozilla/5.0", "Cookie": COOKIE_FILE.read_text().strip()})
         _local.s = s
     return _local.s
 
 
-def _get(url: str, tries: int = 3) -> str | None:
+def _get(url: str, tries: int = 8) -> str | None:
     for i in range(tries):
         try:
             r = _session().get(url, timeout=40)
@@ -59,7 +76,11 @@ def _get(url: str, tries: int = 3) -> str | None:
                 log.error("Session expired (login page returned) for %s", url)
                 return None
         except requests.RequestException as e:
-            log.warning("retry %s: %s", url, e)
+            log.warning("retry %s: %s", url, str(e)[:120])
+            if isinstance(e, requests.exceptions.ProxyError):
+                if hasattr(_local, "s"):
+                    del _local.s
+            time.sleep(min(30, 3 * (i + 1)))
     return None
 
 
