@@ -20,7 +20,7 @@ from sp_scraper.exporters import (
     write_catalogue_xlsx, write_shopify_csv,
 )
 
-from .extract import BASE, CATEGORY_MAP, extract_product, item_code, listing_total, parse_listing
+from .extract import BASE, CATEGORY_MAP, _txt, extract_product, listing_total, parse_listing
 
 log = logging.getLogger("hl_scraper")
 COOKIE_FILE = Path(".auth/hailys_cookie.txt")
@@ -119,21 +119,49 @@ SITES = {
 }
 
 
+def discover_groups(home: str, prefix: str) -> list[tuple[str, str]]:
+    """(slug, German label) of every group listed under a shop line in the live menu."""
+    out: dict[str, str] = {}
+    for slug, label in re.findall(rf'href="https://shop\.[a-z0-9.-]+{re.escape(prefix)}/([a-z0-9-]+)\.html"[^>]*>(.*?)</a>', home, re.S):
+        label = _txt(label)
+        if label and label != "Alle anzeigen":
+            out.setdefault(slug, label)
+    return list(out.items())
+
+
+def category_for_group(label: str) -> str:
+    return CATEGORY_MAP.get(label, "Other")
+
+
+def line_prefixes() -> list[tuple[str, str]]:
+    if SITE == "hailys":
+        return [("/hailys", "HAILYS"), ("/hailys-teens", "TEENS"), ("/z-one", "Z-ONE")]
+    return [("/zabaione", "ZABAIONE")]
+
+
+def build_leaf_map(home: str) -> dict[str, str]:
+    """Leaf category name (as on product pages) -> catalogue category, from the shop menu."""
+    labels = {slug: label for prefix, _ in line_prefixes() for slug, label in discover_groups(home, prefix)}
+    out: dict[str, str] = {}
+    for line, group, label in re.findall(
+            r'href="https://shop\.[a-z0-9.-]+/([a-z0-9-]+)/([a-z0-9-]+)/[a-z0-9-]+\.html"[^>]*>(.*?)</a>', home, re.S):
+        if group in labels and line in {pf.strip("/") for pf, _ in line_prefixes()}:
+            out.setdefault(_txt(label), category_for_group(labels[group]))
+    return out
+
+
 def build_queue() -> tuple[dict[str, dict], dict]:
     """Return {url: info} deduped; group listings define the category."""
+    home = _get(f"{BASE}/") or ""
     sources = []
-    if SITE == "hailys":
-        for g in MAIN_GROUPS:
-            sources.append((f"/hailys/{g}.html", "HAILYS", GROUP_NAME[g]))
-        for g in TEEN_GROUPS:
-            sources.append((f"/hailys-teens/{g}.html", "TEENS", GROUP_NAME[g]))
-        for g in ZONE_GROUPS:
-            sources.append((f"/z-one/{g}.html", "Z-ONE", GROUP_NAME[g]))
-    else:
-        for g in ZAB_GROUPS:
-            sources.append((f"/zabaione/{g}.html", "ZABAIONE", GROUP_NAME[g]))
+    for prefix, line in line_prefixes():
+        for slug, label in discover_groups(home, prefix):
+            sources.append((f"{prefix}/{slug}.html", line, label))
+    log.info("Groups discovered: %d (%s)", len(sources), ", ".join(sorted({l for _, _, l in sources})))
     sources.append(("/pos.html", "POS", ""))
     extra = [("/nos.html", "NOS"), ("/new-in.html", "NEW IN"), ("/topseller.html", "TOPSELLER")]
+    if SITE == "hailys":
+        extra.insert(0, ("/black-friday.html", "BLACK WEEKS"))
 
     queue: dict[str, dict] = {}
     stats = {"listing_hits": 0, "dupes_skipped": 0, "per_source": {}}
@@ -145,7 +173,7 @@ def build_queue() -> tuple[dict[str, dict], dict]:
             if it["url"] in queue:
                 stats["dupes_skipped"] += 1
                 continue
-            it.update(line=line, group=group, category=CATEGORY_MAP.get(group, ""), tags=[])
+            it.update(line=line, group=group, category=category_for_group(group) if group else "", tags=[])
             queue[it["url"]] = it
         log.info("%-40s %4d items (queue %d)", path, len(items), len(queue))
     for path, tag in extra:
@@ -177,6 +205,10 @@ def cmd_scrape(args) -> int:
     log.info("Unique product URLs: %d (listing hits %d, duplicates skipped %d)",
              len(queue), stats["listing_hits"], stats["dupes_skipped"])
 
+    home = _get(f"{BASE}/") or ""
+    leaf_map = build_leaf_map(home)
+    log.info("Leaf category map: %d entries", len(leaf_map))
+
     done = {p.url for p in load_products_jsonl(jsonl)}
     todo = [u for u in queue if u not in done]
     log.info("%d to fetch (%d already done)", len(todo), len(done))
@@ -189,13 +221,15 @@ def cmd_scrape(args) -> int:
         info = queue[u]
         page = _get(u)
         p = extract_product(page, u, info, info["category"]) if page else None
+        if p and not p.category:
+            p.category = leaf_map.get(p.attributes.get("leaf", ""), "")
         with lock:
             counter["n"] += 1
             if not p:
                 failed.append(u)
                 log.warning("[%d/%d] FAILED %s", counter["n"], len(todo), u)
                 return
-            p.season = ",".join(t for t in ("NOS", "TOPSELLER") if t in info["tags"])
+            p.season = ",".join(t for t in ("NOS", "TOPSELLER", "BLACK WEEKS") if t in info["tags"])
             append_product_jsonl(jsonl, p)
             if counter["n"] % 50 == 0:
                 log.info("[%d/%d] %s", counter["n"], len(todo), p.style_name)
@@ -204,23 +238,35 @@ def cmd_scrape(args) -> int:
         list(ex.map(work, todo))
 
     products = load_products_jsonl(jsonl)
-    # a style (article number) has one page per colour, so dedupe on style + colour
-    seen_key, uniq = set(), []
-    for p in products:
-        key = (p.style_code, p.color)
-        if key in seen_key:
-            log.warning("Duplicate style+colour dropped: %s %s %s", p.style_code, p.color, p.url)
-            continue
-        seen_key.add(key)
-        for v in p.variants:
-            v.sku = item_code(p.style_code, p.color, v.size)
-        uniq.append(p)
-    log.info("Scraped %d products (%d failed, %d duplicates by style+colour)",
+    uniq = finalize(products)
+    log.info("Scraped %d products (%d failed, %d duplicate pages)",
              len(uniq), len(failed), len(products) - len(uniq))
     (out / f"{PREFIX}_failed.json").write_text(json.dumps(failed, indent=1))
     (out / f"{PREFIX}_stats.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False))
     _export(uniq, out)
     return 1 if failed else 0
+
+
+def finalize(products):
+    """One entry per product page; unique item codes; accessories that only carry a line name as category."""
+    seen_url, uniq = set(), []
+    for p in products:
+        if p.url in seen_url:
+            continue
+        seen_url.add(p.url)
+        if not p.category and p.attributes.get("leaf") in ("HAILYS", "HAILYS TEENS", "ZABAIONE"):
+            p.category = "Accessories"
+        uniq.append(p)
+    counts: dict[str, int] = {}
+    for p in uniq:
+        for v in p.variants:
+            counts[v.sku] = counts.get(v.sku, 0) + 1
+    for p in uniq:
+        if any(counts[v.sku] > 1 for v in p.variants):
+            tail = re.sub(r"[^a-z0-9]+", "-", p.url.rsplit("/", 1)[-1].removesuffix(".html").lower()).strip("-")
+            for v in p.variants:
+                v.sku = f"{v.sku}-{tail}"
+    return uniq
 
 
 def _export(products, out: Path) -> None:
@@ -243,15 +289,7 @@ def _export(products, out: Path) -> None:
 
 def cmd_export(args) -> int:
     out = Path(args.output)
-    seen, uniq = set(), []
-    for p in load_products_jsonl(out / f"{PREFIX}_products.jsonl"):
-        if (p.style_code, p.color) in seen:
-            continue
-        seen.add((p.style_code, p.color))
-        for v in p.variants:
-            v.sku = item_code(p.style_code, p.color, v.size)
-        uniq.append(p)
-    _export(uniq, out)
+    _export(finalize(load_products_jsonl(out / f"{PREFIX}_products.jsonl")), out)
     return 0
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 
 from sp_scraper.models import Product, Variant
@@ -11,6 +12,7 @@ BASE = "https://shop.hailys-fashion.com"
 # Hailys group name (German) -> catalogue category
 CATEGORY_MAP = {
     "Accessoires": "Accessories",
+    "Modeschmuck": "Accessories",
     "Schals/Tücher": "Accessories",
     "Strümpfe/Strumpfhosen": "Accessories",
     "Schuhe": "Footwear",
@@ -79,33 +81,66 @@ def split_name(full: str) -> tuple[str, str]:
     return full.strip(), ""
 
 
-def _matrix_groups(page: str) -> list[dict]:
-    groups = []
-    for kind in ("singles", "lots"):
-        for m in re.finditer(rf'<div class="matrix-group {kind}">(.*?)(?=<div class="matrix-group |</div></div><section|<section class="cell xsells|\Z)', page, re.S):
-            seg = m.group(1)
-            tbl = re.search(r'<table class="matrix">(.*?)</table>', seg, re.S)
-            if not tbl:
-                continue
-            t = tbl.group(1)
-            head = [_txt(h) for h in re.findall(r"<th[^>]*>(.*?)</th>", t.split("</thead>")[0], re.S)]
-            rows = []
-            for r in re.findall(r"<tr>(.*?)</tr>", t.split("</thead>")[1], re.S):
-                th = re.search(r"<th[^>]*>(.*?)</th>", r, re.S)
-                tds = [_txt(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", r, re.S)]
-                rows.append((_txt(th.group(1)) if th else "", tds))
-            unit = re.search(r'unit_price">.*?class="price">(.*?)</span>', seg, re.S)
-            rrp = re.search(r'class="rrp">.*?class="price">(.*?)</span>', seg, re.S)
-            lot = re.search(r'class="lot-price">.*?class="price">(.*?)</span>', seg, re.S)
-            soon = re.search(r"Voraussichtlicher Liefertermin:\s*([\d/]+)", seg)
-            groups.append({
-                "kind": kind, "head": head, "rows": rows,
-                "unit": _price(unit.group(1)) if unit else None,
-                "rrp": _price(rrp.group(1)) if rrp else None,
-                "lot": _price(lot.group(1)) if lot else None,
-                "soon": soon.group(1) if soon else "",
-            })
-    return groups
+_STOCK_RE = re.compile(r"(?:Auf Lager|In stock):\s*</strong>\s*([\d.]+)", re.I)
+_MORE_RE = re.compile(r"(?:Mehr als|More than)\s*([\d.]+)\s*Lots?", re.I)
+_SOON_RE = re.compile(r"(?:Voraussichtlicher Liefertermin|Expected delivery date|Expected delivery)[:\s]*([\d/.\-]+)", re.I)
+
+
+def _parse_container(kind: str, seg: str) -> dict | None:
+    tbl = re.search(r'<table class="matrix">(.*?)</table>', seg, re.S)
+    if not tbl or "</thead>" not in tbl.group(1):
+        return None
+    t = tbl.group(1)
+    head = [_txt(h) for h in re.findall(r"<th[^>]*>(.*?)</th>", t.split("</thead>")[0], re.S)]
+    rows = []
+    for r in re.findall(r"<tr>(.*?)</tr>", t.split("</thead>")[1], re.S):
+        th = re.search(r"<th[^>]*>(.*?)</th>", r, re.S)
+        tds = [_txt(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", r, re.S)]
+        rows.append((_txt(th.group(1)) if th else "", tds))
+    unit = re.search(r'unit_price">.*?class="price">(.*?)</span>', seg, re.S)
+    rrp = re.search(r'class="rrp">.*?class="price">(.*?)</span>', seg, re.S)
+    lot = re.search(r'class="lot-price">.*?class="price">(.*?)</span>', seg, re.S)
+    stock = _STOCK_RE.search(seg)
+    more = None if stock else _MORE_RE.search(seg)
+    soon = _SOON_RE.search(seg)
+    return {
+        "kind": kind, "head": head, "rows": rows,
+        "unit": _price(unit.group(1)) if unit else None,
+        "rrp": _price(rrp.group(1)) if rrp else None,
+        "lot": _price(lot.group(1)) if lot else None,
+        "lots_in_stock": int((stock or more).group(1).replace(".", "")) if (stock or more) else None,
+        "stock_is_minimum": bool(more),
+        "soon": soon.group(1) if soon else "",
+    }
+
+
+def _offers(page: str) -> list[dict]:
+    """Every order block on the page: one per lot offer / single-item block, in page order."""
+    start = page.find('<div class="matrix-groups')
+    if start < 0:
+        return []
+    ends = [e for e in (page.find('<section class="cell xsells', start), page.find("Das könnte Sie auch interessieren", start)) if e > 0]
+    area = page[start:min(ends) if ends else len(page)]
+    groups = list(re.finditer(r'<div class="matrix-group (singles|lots)">', area))
+    out = []
+    for i, gm in enumerate(groups):
+        seg = area[gm.end(): groups[i + 1].start() if i + 1 < len(groups) else len(area)]
+        parts = re.split(r'<div class="matrix-container [^"]*">', seg)
+        for part in (parts[1:] or [seg]):
+            o = _parse_container(gm.group(1), part)
+            if o:
+                out.append(o)
+    return out
+
+
+def page_leaf_category(page: str) -> str:
+    m = re.search(r'"category"\s*:\s*"((?:[^"\\]|\\.)*)"', page)
+    if not m:
+        return ""
+    try:
+        return html.unescape(json.loads('"' + m.group(1) + '"'))
+    except ValueError:
+        return html.unescape(m.group(1))
 
 
 def _images(page: str) -> list[str]:
@@ -132,64 +167,77 @@ def extract_product(page: str, url: str, tile: dict, category: str) -> Product |
     art_no = _attr(page, "art_no")
     if not full or not art_no:
         return None
-    style_name, colour = split_name(full)
-    groups = _matrix_groups(page)
+    style_name, title_colour = split_name(full)
+    offers = _offers(page)
+    multi = len(offers) > 1
+    fmt = lambda v: f"{v:.2f}".replace(".", ",")
 
-    singles = next((g for g in groups if g["kind"] == "singles"), None)
-    lots = next((g for g in groups if g["kind"] == "lots"), None)
-    if singles and singles["head"]:
-        colour = singles["head"][0] or colour
-    elif lots and lots["rows"] and lots["rows"][0][0]:
-        colour = lots["rows"][0][0] or colour
+    variants: list[Variant] = []
+    notes: list[str] = []
+    for n, o in enumerate(offers, 1):
+        suffix = f"-o{n}" if multi else ""
+        sizes = [s for s in o["head"][1:] if s and s != "\xa0"]
+        unit, rrp = o["unit"], o["rrp"]
+        tag = f"Offer {n}: " if multi else ""
+        if o["kind"] == "singles":
+            colour = o["head"][0] or title_colour
+            stock = {}
+            for label, tds in o["rows"]:
+                if re.match(r"(verf|avail)", label, re.I):
+                    for s, v in zip(sizes, tds):
+                        stock[s] = int(v.replace(".", "")) if v.replace(".", "").isdigit() else None
+            for s in sizes:
+                variants.append(Variant(color=colour, size=s, ean="", sku=item_code(art_no, colour, s) + suffix,
+                                        stock=stock.get(s), wholesale_price=unit, retail_price=rrp))
+            note = f"{tag}single items, stock per size: " + ", ".join(f"{s} {stock.get(s, 0)}" for s in sizes)
+        else:
+            lots_in = o["lots_in_stock"]
+            per_lot_total, pack_bits = 0, []
+            for colour, qtys in o["rows"]:
+                colour = colour or title_colour
+                for s, q in zip(sizes, qtys):
+                    if not q.isdigit() or int(q) == 0:
+                        continue
+                    q = int(q)
+                    per_lot_total += q
+                    pieces = lots_in * q if lots_in is not None else (0 if o["soon"] else None)
+                    variants.append(Variant(color=colour, size=s, ean="", sku=item_code(art_no, colour, s) + suffix,
+                                            stock=pieces, wholesale_price=unit, retail_price=rrp))
+                    pack_bits.append(f"{colour} {s} x{q}")
+            note = f"{tag}sold as lot of {per_lot_total} pcs ({', '.join(pack_bits)})"
+            if lots_in is not None and o.get("stock_is_minimum"):
+                note += f"; more than {lots_in} lots in stock (portal shows no exact number), so at least {lots_in * per_lot_total} pcs"
+            elif lots_in is not None:
+                note += f"; {lots_in} lots in stock = {lots_in * per_lot_total} pcs"
+            if o["lot"] is not None:
+                note += f"; lot price {fmt(o['lot'])} EUR"
+        if unit is not None:
+            note += f"; piece price {fmt(unit)} EUR"
+        if o["soon"]:
+            note += f"; incoming, expected delivery {o['soon']}"
+        notes.append(note)
 
-    main = singles or lots
-    wholesale = main["unit"] if main else None
-    retail = main["rrp"] if main else None
-    images = _images(page)
+    if not variants:
+        variants = [Variant(color=title_colour, size="one size", ean="", sku=item_code(art_no, title_colour, "one size"),
+                            stock=0)]
+        notes.append("No order block on the page: not orderable at the moment, stock 0")
+    colours = list(dict.fromkeys(v.color for v in variants))
+    first = offers[0] if offers else {}
 
-    stock: dict[str, int | None] = {}
-    sizes: list[str] = []
-    if singles:
-        sizes = [s for s in singles["head"][1:] if s]
-        for label, tds in singles["rows"]:
-            if label.lower().startswith("verf"):
-                for s, v in zip(sizes, tds):
-                    stock[s] = int(v) if v.isdigit() else None
-    elif lots:
-        sizes = [s for s in lots["head"][1:] if s and s != "\xa0"]
-
-    desc_bits = []
-    if lots:
-        pack = [f"{s} x{q}" for s, q in zip(sizes, lots["rows"][0][1])] if lots["rows"] else []
-        piece_count = sum(int(q) for q in (lots["rows"][0][1] if lots["rows"] else []) if q.isdigit())
-        desc_bits.append(f"Sold as lot ({piece_count} pcs): {', '.join(pack)}"
-                         + (f"; lot price {lots['lot']:.2f} EUR".replace(".", ",") if lots["lot"] else ""))
-    if singles and lots:
-        desc_bits.append("Also available as single items")
-    if main and main["soon"]:
-        desc_bits.append(f"Expected delivery {main['soon']}")
-
-    p = Product(
+    return Product(
         url=url,
         category=category,
         brand=_attr(page, "brand") or "Hailys",
         style_code=art_no,
         style_name=style_name,
-        description=". ".join(desc_bits),
+        description=". ".join(notes),
         composition=_attr(page, "material"),
         care="",
         gender={"Woman": "female", "Teens": "teens"}.get(tile.get("subline", ""), tile.get("subline", "").lower()),
-        color=colour,
-        wholesale_price=wholesale,
-        retail_price=retail,
-        images=images,
-        attributes={"flags": ",".join(tile.get("flags", [])), "tile_name": full},
+        color=colours[0] if len(colours) == 1 else (title_colour or colours[0]),
+        wholesale_price=first.get("unit"),
+        retail_price=first.get("rrp"),
+        images=_images(page),
+        variants=variants,
+        attributes={"flags": ",".join(tile.get("flags", [])), "tile_name": full, "leaf": page_leaf_category(page)},
     )
-    if not sizes:
-        sizes = ["one size"]
-    p.variants = [
-        Variant(color=colour, size=s, ean="", sku=item_code(art_no, colour, s),
-                stock=stock.get(s), wholesale_price=wholesale, retail_price=retail)
-        for s in sizes
-    ]
-    return p
