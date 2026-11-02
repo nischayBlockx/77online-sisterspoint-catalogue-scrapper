@@ -209,7 +209,8 @@ def build_product(line: dict, detail: dict | None, sizes: dict | None, category:
             by_size = grp.get("variantsBySize") or {}
             for size in order + [x for x in by_size if x not in order]:
                 for ean in by_size.get(size, []):
-                    stock = (avail.get(str(ean)) or {}).get("totalAmount")
+                    # sizes missing from the availability list have no stock at all
+                    stock = (avail.get(str(ean)) or {}).get("totalAmount", 0)
                     variants.append(Variant(
                         color=colour, size=f"{size}/{length}" if length else size, ean=str(ean),
                         sku=f"{p.style_code}-{mid.replace('M_', '')}-{size}{('-' + length) if length else ''}",
