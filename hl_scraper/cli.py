@@ -160,8 +160,7 @@ def build_queue() -> tuple[dict[str, dict], dict]:
     log.info("Groups discovered: %d (%s)", len(sources), ", ".join(sorted({l for _, _, l in sources})))
     sources.append(("/pos.html", "POS", ""))
     extra = [("/nos.html", "NOS"), ("/new-in.html", "NEW IN"), ("/topseller.html", "TOPSELLER")]
-    if SITE == "hailys":
-        extra.insert(0, ("/black-friday.html", "BLACK WEEKS"))
+    extra.insert(0, ("/black-friday.html", "BLACK WEEKS"))
 
     queue: dict[str, dict] = {}
     stats = {"listing_hits": 0, "dupes_skipped": 0, "per_source": {}}
@@ -254,8 +253,9 @@ def finalize(products):
         if p.url in seen_url:
             continue
         seen_url.add(p.url)
-        if not p.category and p.attributes.get("leaf") in ("HAILYS", "HAILYS TEENS", "ZABAIONE"):
-            p.category = "Accessories"
+        if not p.category and p.attributes.get("leaf") in ("HAILYS", "HAILYS TEENS", "ZABAIONE", "BLACK WEEKS"):
+            name = p.style_name.lower()
+            p.category = "Outerwear" if any(w in name for w in ("blouson", "jacket", "coat", "blazer")) else "Accessories"
         uniq.append(p)
     counts: dict[str, int] = {}
     for p in uniq:
