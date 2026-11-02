@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +16,23 @@ BASE = "https://more.bestseller.com"
 COOKIE_FILE = Path(".auth/bestseller_cookies.json")
 
 
+def _proxy_url() -> str | None:
+    """Current local egress proxy; its port changes when the proxy restarts."""
+    try:
+        m = re.search(r"local proxy at (http://127\.0\.0\.1:\d+)", Path("/root/.ccr/README.md").read_text())
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
 class BestsellerHTTP:
     def __init__(self):
         self._session = requests.Session()
+        proxy = _proxy_url()
+        if proxy:
+            self._session.proxies = {"https": proxy, "http": proxy}
         self._session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -79,9 +95,42 @@ class BestsellerHTTP:
             return resp.json().get("id", 55)
         return 55
 
+    def _retry(self, fn, tries: int = 6):
+        for i in range(tries):
+            try:
+                return fn()
+            except requests.RequestException as e:
+                log.warning("retry %d: %s", i + 1, str(e)[:100])
+                if isinstance(e, requests.exceptions.ProxyError):
+                    proxy = _proxy_url()
+                    if proxy:
+                        self._session.proxies = {"https": proxy, "http": proxy}
+                time.sleep(min(30, 3 * (i + 1)))
+        return None
+
+    def get_product_detail(self, style_number: str) -> dict | None:
+        resp = self._retry(lambda: self._session.get(f"{BASE}/api/product/{style_number}", timeout=30))
+        if resp is None or resp.status_code != 200 or "json" not in resp.headers.get("content-type", ""):
+            return None
+        return resp.json()
+
+    def get_sizes(self, family_id: str) -> dict | None:
+        """Sizes view of a style: per colour (master) the sizes with EANs, plus stock per EAN."""
+        data = self.api_post("/api/productbasket/index", {
+            "familyId": family_id,
+            "basketLines": [],
+            "basketDeliveryDate": "1900-01-01",
+            "groupingTypeRequest": "Non",
+            "includeShipToGrouping": False,
+            "shippingFilter": "DeliveryDate",
+        })
+        return (data or {}).get("basketContents")
+
     def api_post(self, path: str, body: dict) -> Any:
         url = f"{BASE}{path}"
-        resp = self._session.post(url, json=body, timeout=30)
+        resp = self._retry(lambda: self._session.post(url, json=body, timeout=30))
+        if resp is None:
+            return None
         if resp.status_code != 200:
             log.warning("POST %s returned %s", path, resp.status_code)
             return None

@@ -12,7 +12,7 @@ from sp_scraper.exporters import (
     products_to_rows, write_catalogue_xlsx, write_shopify_csv,
 )
 
-from .extract import extract_product_from_api
+from .extract import build_product, extract_product_from_api, map_category
 from .http_client import BestsellerHTTP, COOKIE_FILE
 
 log = logging.getLogger("bs_scraper")
@@ -164,23 +164,46 @@ def cmd_scrape(args):
     raw_path.write_text(json.dumps(items, indent=2, ensure_ascii=False))
     log.info("Raw API data saved to %s", raw_path)
 
-    new_count = 0
-    skipped = 0
-    for i, item in enumerate(items, 1):
-        p = extract_product_from_api(item, category=args.category or "Favourites")
-        if not p or not p.style_code:
-            log.warning("[%d/%d] Skipped: no style code — keys: %s",
-                        i, len(items), list(item.keys())[:10] if isinstance(item, dict) else "?")
-            skipped += 1
-            continue
-        if p.url in scraped_urls:
-            continue
+    from concurrent.futures import ThreadPoolExecutor
 
-        append_product_jsonl(jsonl_path, p)
-        scraped_urls.add(p.url)
-        new_count += 1
-        log.info("[%d/%d] %s | %s | %d variants",
-                 i, len(items), p.style_code, p.style_name, len(p.variants))
+    todo = []
+    for item in items:
+        style = item.get("styleNumber") or ""
+        url = item.get("url") or ""
+        url = url if url.startswith("http") else f"https://more.bestseller.com{url}"
+        if not style:
+            log.warning("Skipped item without style number: %s", list(item.keys())[:8])
+            continue
+        if url not in scraped_urls:
+            todo.append(item)
+    new_count = skipped = 0
+    failed: list[str] = []
+
+    def build(item):
+        style = item["styleNumber"]
+        cat_name = (item.get("category") or {}).get("name") or ""
+        category = args.category or map_category(cat_name, item.get("name") or "")
+        if args.no_sizes:
+            return extract_product_from_api(item, category=category)
+        detail = client.get_product_detail(style)
+        sizes = client.get_sizes(item.get("id") or f"F_{style}")
+        if not sizes or not detail:
+            return None
+        return build_product(item, detail, sizes, category)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for i, (item, p) in enumerate(zip(todo, ex.map(build, todo)), 1):
+            if not p:
+                failed.append(item.get("styleNumber", "?"))
+                log.warning("[%d/%d] FAILED %s %s", i, len(todo), item.get("styleNumber"), item.get("name"))
+                skipped += 1
+                continue
+            append_product_jsonl(jsonl_path, p)
+            scraped_urls.add(p.url)
+            new_count += 1
+            log.info("[%d/%d] %s | %s | %s | %d variants", i, len(todo), p.style_code, p.style_name, p.category, len(p.variants))
+    if failed:
+        (out_dir / "bs_failed.json").write_text(json.dumps(failed))
 
     log.info("Scraped %d new products (%d total, %d skipped)", new_count, len(scraped_urls), skipped)
 
@@ -205,6 +228,15 @@ def _export(jsonl_path: Path, out_dir: Path, args):
         log.warning("No products to export")
         return
 
+    unavailable = [(p.style_code, p.style_name, c) for p in products
+                   for c in (p.attributes.get("colours_without_sizes") or "").split("; ") if c]
+    if unavailable:
+        import csv as _csv
+        with (out_dir / "bs_colours_without_sizes.csv").open("w", newline="", encoding="utf-8") as fh:
+            w = _csv.writer(fh)
+            w.writerow(["style_number", "style_name", "colour (master id)"])
+            w.writerows(unavailable)
+        log.info("%d colours have no orderable sizes -> bs_colours_without_sizes.csv", len(unavailable))
     cfg = {"default_brand": "BESTSELLER", "default_gender": ""}
     rows = products_to_rows(products, cfg)
 
@@ -245,9 +277,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_scrape = sub.add_parser("scrape", help="Scrape products from favourite list")
     p_scrape.add_argument("--list-id", default="tbtayJwvFC", help="Favourite list ID")
-    p_scrape.add_argument("--category", default="", help="Category name override")
+    p_scrape.add_argument("--category", default="", help="Force one category instead of mapping Bestseller categories")
     p_scrape.add_argument("--output", default="output", help="Output directory")
     p_scrape.add_argument("--fresh", action="store_true", help="Ignore resume data")
+    p_scrape.add_argument("--no-sizes", action="store_true", help="Skip sizes/EAN/stock lookups (faster)")
+    p_scrape.add_argument("--workers", type=int, default=4, help="Parallel product lookups")
 
     p_export = sub.add_parser("export", help="Re-export from existing data")
     p_export.add_argument("--output", default="output", help="Output directory")
