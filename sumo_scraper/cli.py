@@ -189,7 +189,28 @@ def finalize(products: list, queue: dict) -> list:
     return uniq
 
 
+def _image_bytes(url: str) -> bytes | None:
+    for _ in range(3):
+        try:
+            r = (_session or _new_session()).get(url, timeout=40)
+            if r.status_code == 200:
+                return r.content
+        except requests.RequestException:
+            time.sleep(2)
+    return None
+
+
+def _tag_image_kinds(products: list, out: Path) -> None:
+    """Mark each gallery photo as model (M) or flat (F); the exporter uses it to fill the image columns."""
+    from .images import classify
+
+    kinds = classify([u for p in products for u in p.images], _image_bytes, out / "image_kinds.json")
+    for p in products:
+        p.attributes["image_kinds"] = "".join(kinds.get(u, "M") for u in p.images)
+
+
 def _export(products: list, out: Path) -> None:
+    _tag_image_kinds(products, out)
     rows = products_to_rows(products, {"default_brand": "Sisters Point", "default_gender": "female"})
     write_catalogue_xlsx(rows, out / "sp_catalogue_all.xlsx")
     write_shopify_csv(rows, out / "sp_shopify_products_all.csv", {

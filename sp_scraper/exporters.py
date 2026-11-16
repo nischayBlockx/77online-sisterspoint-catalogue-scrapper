@@ -71,10 +71,59 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
             "CreationDate": today,
             "Available Stock": "" if v.stock is None else v.stock,
         })
-        for col, img in zip(IMAGE_COLUMNS, images):
+        for col, img in image_slots(p, v, images).items():
             row[col] = img
         rows.append(row)
     return rows
+
+
+def _by_suffix(images: list[str]) -> dict[str, str]:
+    """Bestseller photo number (001 flat front, 002 flat back, 003 model front, 004 model back, ...)."""
+    out: dict[str, str] = {}
+    for u in images:
+        m = re.search(r"_(\d{3})(?:-b)?\.webp$", u)  # videos (.mp4) are skipped
+        if m:
+            out.setdefault(m.group(1), u)
+    return out
+
+
+def image_slots(p: Product, v: Variant, images: list[str]) -> dict[str, str]:
+    """Which photo goes in which catalogue column, per supplier.
+
+    Model columns (MW1 front, MW2 back, MW4/MW5 extra views) only ever hold photos of a person wearing the
+    item; flat product shots go to P1 (front) and P2 (back). Hailys/Zabaione only have product shots.
+    """
+    brand = (p.brand or "").lower()
+    if brand in ("vero moda", "only"):
+        d = _by_suffix(images)
+        slots = {"ImageProductP1": d.get("001"), "ImageProductP2": d.get("002")}
+        if any(k in d for k in ("003", "004", "005", "006")):  # no model photo -> leave model columns empty
+            slots.update({"ImageModelMW1": d.get("003"), "ImageModelMW2": d.get("004"),
+                          "ImageModelMW4": d.get("006"), "ImageModelMW5": d.get("007")})
+        return {k: u for k, u in slots.items() if u}
+    if brand in ("hailys", "haily\u00b4s teens", "z-one", "zabaione"):
+        groups: dict[str, dict[int, str]] = {}
+        for u in images:
+            m = re.search(r"/(\d+)_(\d+)\.\w+$", u)
+            if m:
+                groups.setdefault(m.group(1), {})[int(m.group(2))] = u
+        sets = [groups[k] for k in sorted(groups)]
+        colours = list(dict.fromkeys(x.color for x in p.variants))
+        g = {}
+        if sets:
+            idx = colours.index(v.color) if (len(colours) > 1 and len(sets) == len(colours) and v.color in colours) else 0
+            g = sets[idx]
+        slots = {"ImageProductP1": g.get(1), "ImageProductP2": g.get(2), "ImageProductP30": g.get(3)}
+        return {k: u for k, u in slots.items() if u}
+    kinds = p.attributes.get("image_kinds") if p.attributes else None
+    if kinds and len(kinds) == len(images):  # Sisters Point: "M"/"F" (model/flat) per gallery photo, in order
+        model = [u for u, k in zip(images, kinds) if k == "M"]
+        flat = [u for u, k in zip(images, kinds) if k == "F"]
+        slots = {"ImageModelMW1": model[0] if model else None, "ImageModelMW2": model[1] if len(model) > 1 else None,
+                 "ImageModelMW4": model[2] if len(model) > 2 else None, "ImageModelMW5": model[3] if len(model) > 3 else None,
+                 "ImageProductP1": flat[0] if flat else None, "ImageProductP2": flat[1] if len(flat) > 1 else None}
+        return {k: u for k, u in slots.items() if u}
+    return dict(zip(IMAGE_COLUMNS, images))
 
 
 def products_to_rows(products: Iterable[Product], cfg: dict | None = None) -> list[dict]:
