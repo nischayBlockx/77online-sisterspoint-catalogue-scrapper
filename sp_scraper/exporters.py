@@ -70,6 +70,7 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
             "ProductText": p.description,
             "CreationDate": today,
             "Available Stock": "" if v.stock is None else v.stock,
+            "ProductLink": p.url,
         })
         for col, img in image_slots(p, v, images).items():
             row[col] = img

@@ -39,6 +39,7 @@ CATALOGUE_COLUMNS = [
     "ImageProductP30",
     "CreationDate",
     "Available Stock",
+    "ProductLink",
 ]
 
 # Image columns in the order images are assigned to them.
