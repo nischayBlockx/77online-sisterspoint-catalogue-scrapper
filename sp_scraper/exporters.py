@@ -226,6 +226,23 @@ SHOPIFY_COLUMNS = [
     "Cost per item", "Status",
 ]
 
+# Gallery order on the shop: model photos first (hero image), then flat shots.
+SHOPIFY_IMAGE_ORDER = ["ImageModelMW1", "ImageModelMW2", "ImageProductP1", "ImageProductP2",
+                       "ImageModelMW4", "ImageModelMW5", "ImageProductP30"]
+SEASON_TAGS = {"NOS": "NOS", "TOPSELLER": "Top Seller", "BLACK WEEKS": "Black Weeks",
+               "GREAT OFFERS": "Great Offers", "PARTY": "Party"}
+
+
+def _shop_tags_and_vendor(first: dict) -> tuple[list[str], str]:
+    """Clean storefront tags (NOS, Top Seller ...) and one vendor per brand (Hailys lines become tags)."""
+    tags = [SEASON_TAGS.get(t.strip(), t.strip().title()) for t in str(first.get("Season") or "").split(",") if t.strip()]
+    brand = str(first.get("Brand") or "")
+    if brand in ("Z-ONE", "Haily\u00b4s Teens"):
+        tags.append("Z-ONE" if brand == "Z-ONE" else "Hailys Teens")
+        brand = "Hailys"
+    return tags, brand
+
+
 SIZE_ORDER = ["XXXS", "XXS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "XXXL", "3XL", "4XL", "5XL", "6XL"]
 
 
@@ -309,14 +326,15 @@ def rows_to_shopify(rows: list[dict], cfg: dict | None = None) -> list[dict]:
         images: list[str] = []
         color_image: dict[str, str] = {}
         for i in items:
-            for col in IMAGE_COLUMNS:
+            for col in SHOPIFY_IMAGE_ORDER:
                 u = str(i.get(col) or "").strip()
                 if u:
                     color_image.setdefault(str(i.get("Color") or ""), u)
                     if u not in images:
                         images.append(u)
 
-        tags = [t for t in [first.get("Brand"), first.get("ItemMainCategory"), first.get("Season"), first.get("Gender")] if t]
+        season_tags, brand_name = _shop_tags_and_vendor(first)
+        tags = [t for t in [brand_name, first.get("ItemMainCategory"), *season_tags, first.get("Gender")] if t]
         tags += extra_tags
         seen_option_values: set[tuple] = set()
         variant_rows = []
@@ -364,7 +382,7 @@ def rows_to_shopify(rows: list[dict], cfg: dict | None = None) -> list[dict]:
         variant_rows[0].update({
             "Title": title,
             "Body (HTML)": _body_html(first),
-            "Vendor": vendor_override or first.get("Brand") or "",
+            "Vendor": vendor_override or brand_name or "",
             "Product Category": shop.get("product_category", ""),
             "Type": first.get("ItemMainCategory") or "",
             "Tags": ", ".join(dict.fromkeys(str(t) for t in tags)),
