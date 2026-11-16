@@ -156,6 +156,7 @@ def extract_product(page: str, url: str) -> Product | None:
             txt += f"; sold out: {', '.join(dict.fromkeys(sold_out))}"
         notes.append(txt)
 
+    extra_attrs = {"original_price": str(original)} if offer is not None and original is not None else {}
     if offer is not None and original is not None:
         notes.insert(0, f"Offer price EUR {offer:.2f} (was EUR {original:.2f})")
     if incoming:
@@ -181,6 +182,6 @@ def extract_product(page: str, url: str) -> Product | None:
         retail_price=rrp,
         images=images,
         variants=variants,
-        attributes={"item_category": item_category, "availability": _by_id(page, "commodity-show-availability"),
+        attributes={**extra_attrs, "item_category": item_category, "availability": _by_id(page, "commodity-show-availability"),
                     **{k: v for k, v in info.items() if k not in ("color", "externalcode", "material")}},
     )

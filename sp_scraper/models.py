@@ -40,6 +40,9 @@ CATALOGUE_COLUMNS = [
     "CreationDate",
     "Available Stock",
     "ProductLink",
+    "Original_Wholesale_Price_Euro",
+    "Discount_Percent",
+    "On_Offer",
 ]
 
 # Image columns in the order images are assigned to them.

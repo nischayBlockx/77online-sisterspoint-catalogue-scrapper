@@ -171,6 +171,10 @@ def build_product(line: dict, detail: dict | None, sizes: dict | None, category:
     p = extract_product_from_api(line, category=category)
     if not p:
         return None
+    pricing = line.get("pricingDetails") or {}
+    if pricing.get("originalPrice") and pricing.get("discount"):
+        p.attributes["original_price"] = str(pricing["originalPrice"])
+        p.attributes["discount_percent"] = str(pricing["discount"])
     detail = detail or {}
     q = _quality_fields(detail.get("qualityDescription", ""))
     p.composition = q.get("composition", "")

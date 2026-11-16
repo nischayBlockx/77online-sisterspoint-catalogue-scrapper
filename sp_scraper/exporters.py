@@ -35,6 +35,29 @@ def base_style_code(code: str) -> str:
     return m.group(1) if m else (code or "")
 
 
+def price_info(p: Product, price: float | None) -> tuple[float | None, int | None, str]:
+    """(original wholesale price, discount %, on-offer text).
+
+    Original price comes from the supplier when it publishes one (Bestseller originalPrice, Sisters Point
+    "was" price). Hailys/Zabaione only flag items as Sale and show the reduced price, so no original exists.
+    """
+    orig = None
+    raw = p.attributes.get("original_price") if p.attributes else None
+    try:
+        orig = float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        orig = None
+    if orig is None:
+        m = re.search(r"\(was EUR ([\d.]+)\)", p.description or "")
+        orig = float(m.group(1)) if m else None
+    if orig and price and orig > price:
+        return orig, round((1 - price / orig) * 100), "Yes"
+    flags = (p.attributes or {}).get("flags", "") or ""
+    if "Sale" in str(flags).split(","):
+        return None, None, "Yes (supplier Sale flag, original price not published)"
+    return None, None, "No"
+
+
 def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
     cfg = cfg or {}
     decimal_comma = cfg.get("decimal_comma", True)
@@ -47,6 +70,7 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
         row = {c: "" for c in CATALOGUE_COLUMNS}
         size = v.size or "one size"
         color = v.color or p.color
+        orig_price, disc_pct, on_offer = price_info(p, v.wholesale_price if v.wholesale_price is not None else p.wholesale_price)
         row.update({
             "Brand": p.brand or cfg.get("default_brand", ""),
             "ItemMainCategory": p.category,
@@ -71,6 +95,9 @@ def product_to_rows(p: Product, cfg: dict | None = None) -> list[dict]:
             "CreationDate": today,
             "Available Stock": "" if v.stock is None else v.stock,
             "ProductLink": p.url,
+            "Original_Wholesale_Price_Euro": fmt_decimal(orig_price, decimal_comma) if orig_price else "",
+            "Discount_Percent": disc_pct if disc_pct is not None else "",
+            "On_Offer": on_offer,
         })
         for col, img in image_slots(p, v, images).items():
             row[col] = img
@@ -240,6 +267,8 @@ def _shop_tags_and_vendor(first: dict) -> tuple[list[str], str]:
     if brand in ("Z-ONE", "Haily\u00b4s Teens"):
         tags.append("Z-ONE" if brand == "Z-ONE" else "Hailys Teens")
         brand = "Hailys"
+    if str(first.get("On_Offer") or "").startswith("Yes") and "Sale" not in tags:
+        tags.append("Sale")
     return tags, brand
 
 
