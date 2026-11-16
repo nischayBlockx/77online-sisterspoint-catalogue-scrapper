@@ -74,11 +74,16 @@ def cmd_login(args):
 def cmd_import_cookies(args):
     """Import cookies from a string or file."""
     client = BestsellerHTTP()
-    if args.cookie_input and Path(args.cookie_input).exists():
-        if not client.load_cookies(Path(args.cookie_input)):
+    raw = args.cookie_input or ""
+    try:
+        is_file = bool(raw) and len(raw) < 1000 and Path(raw).is_file()
+    except OSError:
+        is_file = False
+    if is_file and Path(raw).read_text().lstrip()[:1] in "[{":
+        if not client.load_cookies(Path(raw)):
             return 1
     else:
-        cookie_str = args.cookie_input or ""
+        cookie_str = Path(raw).read_text().strip() if is_file else raw
         if not cookie_str:
             print("Paste your Cookie header value (from browser DevTools):")
             cookie_str = input().strip()
